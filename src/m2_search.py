@@ -6,10 +6,12 @@ import os, sys
 import math
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (QDRANT_HOST, QDRANT_PORT, COLLECTION_NAME, EMBEDDING_MODEL,
-                    EMBEDDING_DIM, BM25_TOP_K, DENSE_TOP_K, HYBRID_TOP_K)
+                    EMBEDDING_DIM, BM25_TOP_K, DENSE_TOP_K, HYBRID_TOP_K,
+                    HF_CACHE_DIR, QDRANT_LOCAL_FALLBACK)
 
 
 @dataclass
@@ -109,23 +111,51 @@ class _SimpleBM25:
 class DenseSearch:
     def __init__(self):
         from qdrant_client import QdrantClient
-        self.client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        self.client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, check_compatibility=False)
         self._encoder = None
+        self._using_local_fallback = False
 
     def _get_encoder(self):
         if self._encoder is None:
             from sentence_transformers import SentenceTransformer
-            self._encoder = SentenceTransformer(EMBEDDING_MODEL)
+            model_source = _cached_sentence_transformer_path(EMBEDDING_MODEL) or EMBEDDING_MODEL
+            kwargs = {}
+            hf_token = os.getenv("HF_TOKEN")
+            if hf_token:
+                kwargs["token"] = hf_token
+            if model_source != EMBEDDING_MODEL or os.getenv("HF_HUB_OFFLINE") == "1":
+                kwargs["local_files_only"] = True
+            try:
+                self._encoder = SentenceTransformer(
+                    model_source,
+                    cache_folder=HF_CACHE_DIR,
+                    **kwargs,
+                )
+            except TypeError:
+                kwargs.pop("token", None)
+                self._encoder = SentenceTransformer(model_source, **kwargs)
         return self._encoder
 
     def index(self, chunks: list[dict], collection: str = COLLECTION_NAME) -> None:
         """Index chunks into Qdrant."""
         from qdrant_client.models import Distance, PointStruct, VectorParams
 
-        self.client.recreate_collection(
-            collection,
-            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
-        )
+        try:
+            self._recreate_collection(collection, VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE))
+        except Exception:
+            if not QDRANT_LOCAL_FALLBACK:
+                raise RuntimeError(
+                    f"Cannot connect to Qdrant at {QDRANT_HOST}:{QDRANT_PORT}. "
+                    "Start it with `docker compose up -d`, then run the pipeline again."
+                ) from None
+            from qdrant_client import QdrantClient
+            print(
+                f"  [warn] Qdrant at {QDRANT_HOST}:{QDRANT_PORT} unavailable; using in-memory Qdrant fallback.",
+                flush=True,
+            )
+            self.client = QdrantClient(":memory:")
+            self._using_local_fallback = True
+            self._recreate_collection(collection, VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE))
         if not chunks:
             return
         texts = [str(chunk.get("text", "")) for chunk in chunks]
@@ -147,7 +177,13 @@ class DenseSearch:
             return []
         vector = self._get_encoder().encode(query)
         query_vector = vector.tolist() if hasattr(vector, "tolist") else list(vector)
-        response = self.client.query_points(collection, query=query_vector, limit=top_k)
+        try:
+            response = self.client.query_points(collection, query=query_vector, limit=top_k)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot query Qdrant at {QDRANT_HOST}:{QDRANT_PORT}. "
+                "Start it with `docker compose up -d`, then run the pipeline again."
+            ) from None
         results = []
         for point in getattr(response, "points", response):
             payload = dict(getattr(point, "payload", None) or {})
@@ -155,6 +191,27 @@ class DenseSearch:
             results.append(SearchResult(text=text, score=float(point.score),
                                         metadata=payload, method="dense"))
         return results
+
+    def _recreate_collection(self, collection: str, vectors_config) -> None:
+        if hasattr(self.client, "collection_exists") and self.client.collection_exists(collection):
+            self.client.delete_collection(collection)
+        self.client.create_collection(collection, vectors_config=vectors_config)
+
+
+def _cached_sentence_transformer_path(model_name: str) -> str | None:
+    model_dir = "models--" + model_name.replace("/", "--")
+    snapshots = Path(HF_CACHE_DIR, "hub", model_dir, "snapshots")
+    if not snapshots.exists():
+        return None
+    for snapshot in sorted(snapshots.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True):
+        if (
+            snapshot.is_dir()
+            and (snapshot / "modules.json").exists()
+            and (snapshot / "config.json").exists()
+            and ((snapshot / "model.safetensors").exists() or (snapshot / "pytorch_model.bin").exists())
+        ):
+            return str(snapshot)
+    return None
 
 
 def reciprocal_rank_fusion(results_list: list[list[SearchResult]], k: int = 60,

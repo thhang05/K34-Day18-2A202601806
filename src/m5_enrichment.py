@@ -12,7 +12,7 @@ import os, re, sys, json
 from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import GOOGLE_API_KEY, LLM_BASE_URL, LLM_MODEL
+from config import LLM_MODEL, OPENAI_API_KEY
 
 
 @dataclass
@@ -35,7 +35,7 @@ def summarize_chunk(text: str) -> str:
     Embed summary thay vì (hoặc cùng với) raw chunk → giảm noise.
     """
     # Implementation outline retained for lab review:
-    # if GOOGLE_API_KEY:
+    # if OPENAI_API_KEY:
     #     try:
     #         response = generate_text(
     #             messages=[
@@ -46,16 +46,16 @@ def summarize_chunk(text: str) -> str:
     #         )
     #         return resp.choices[0].message.content.strip()
     #     except Exception as e:
-    #         print(f"  ⚠️  Google summarize failed: {e}")
+    #         print(f"  ⚠️  OpenAI summarize failed: {e}")
     #
     # Extractive fallback (không cần API):
     # sentences = [s.strip() for s in text.replace("\n", " ").split(". ") if s.strip()]
     # return ". ".join(sentences[:2]) + "." if sentences else text
     if not text or not text.strip():
         return ""
-    if GOOGLE_API_KEY:
+    if OPENAI_API_KEY:
         try:
-            response = _google_text(
+            response = _openai_text(
                 "Tóm tắt đoạn văn sau trong 2-3 câu ngắn gọn bằng tiếng Việt.",
                 text,
                 max_tokens=150,
@@ -63,7 +63,7 @@ def summarize_chunk(text: str) -> str:
             if response:
                 return response
         except Exception as e:
-            print(f"  ⚠️  Google summarize failed: {e}")
+            print(f"  ⚠️  OpenAI summarize failed: {e}")
 
     sentences = [s.strip() for s in re.split(r"(?<=[.!?。！？])\s+|\n+", text) if s.strip()]
     if not sentences:
@@ -81,7 +81,7 @@ def generate_hypothesis_questions(text: str, n_questions: int = 3) -> list[str]:
     Index cả questions lẫn chunk → query match tốt hơn (bridge vocabulary gap).
     """
     # Implementation outline retained for lab review:
-    # if GOOGLE_API_KEY:
+    # if OPENAI_API_KEY:
     #     try:
     #         response = generate_text(
     #             messages=[
@@ -93,16 +93,16 @@ def generate_hypothesis_questions(text: str, n_questions: int = 3) -> list[str]:
     #         questions = resp.choices[0].message.content.strip().split("\n")
     #         return [q.strip().lstrip("0123456789.-) ") for q in questions if q.strip()][:n_questions]
     #     except Exception as e:
-    #         print(f"  ⚠️  Google HyQA failed: {e}")
+    #         print(f"  ⚠️  OpenAI HyQA failed: {e}")
     #
     # Extractive fallback:
     # import re
     # sentences = [s.strip() for s in re.split(r'[.!?\n]', text) if len(s.strip()) > 10]
     if n_questions <= 0 or not text or not text.strip():
         return []
-    if GOOGLE_API_KEY:
+    if OPENAI_API_KEY:
         try:
-            response = _google_text(
+            response = _openai_text(
                 f"Dựa trên đoạn văn, tạo {n_questions} câu hỏi mà đoạn văn có thể trả lời. "
                 "Trả về mỗi câu hỏi trên một dòng, bằng tiếng Việt.",
                 text,
@@ -112,7 +112,7 @@ def generate_hypothesis_questions(text: str, n_questions: int = 3) -> list[str]:
             if questions:
                 return questions
         except Exception as e:
-            print(f"  ⚠️  Google HyQA failed: {e}")
+            print(f"  ⚠️  OpenAI HyQA failed: {e}")
 
     sentences = [s.strip() for s in re.split(r"[.!?。！？\n]+", text) if len(s.strip()) > 10]
     questions = [f"{sentence.rstrip(' .!?。！？')}?" for sentence in sentences[:n_questions]]
@@ -130,7 +130,7 @@ def contextual_prepend(text: str, document_title: str = "") -> str:
     Anthropic benchmark: giảm 49% retrieval failure (alone).
     """
     # Implementation outline retained for lab review:
-    # if GOOGLE_API_KEY:
+    # if OPENAI_API_KEY:
     #     try:
     #         context = generate_text(
     #             messages=[
@@ -142,15 +142,15 @@ def contextual_prepend(text: str, document_title: str = "") -> str:
     #         context = resp.choices[0].message.content.strip()
     #         return f"{context}\n\n{text}"
     #     except Exception as e:
-    #         print(f"  ⚠️  Google contextual failed: {e}")
+    #         print(f"  ⚠️  OpenAI contextual failed: {e}")
     #
     # Simple fallback:
     # prefix = f"Trích từ {document_title}. " if document_title else ""
     if not text:
         return ""
-    if GOOGLE_API_KEY:
+    if OPENAI_API_KEY:
         try:
-            context = _google_text(
+            context = _openai_text(
                 "Viết 1 câu ngắn mô tả đoạn văn này nằm ở đâu trong tài liệu và nói về chủ đề gì. "
                 "Chỉ trả về 1 câu.",
                 f"Tài liệu: {document_title}\n\nĐoạn văn:\n{text}",
@@ -159,7 +159,7 @@ def contextual_prepend(text: str, document_title: str = "") -> str:
             if context:
                 return f"{context}\n\n{text}"
         except Exception as e:
-            print(f"  ⚠️  Google contextual failed: {e}")
+            print(f"  ⚠️  OpenAI contextual failed: {e}")
 
     prefix = f"Trích từ {document_title}. " if document_title else "Ngữ cảnh tài liệu: "
     return f"{prefix}{text}"
@@ -173,7 +173,7 @@ def extract_metadata(text: str) -> dict:
     LLM extract metadata tự động: topic, entities, date_range, category.
     """
     # Implementation outline retained for lab review:
-    # if GOOGLE_API_KEY:
+    # if OPENAI_API_KEY:
     #     try:
     #         import json as _json
     #         response = generate_text(
@@ -185,13 +185,13 @@ def extract_metadata(text: str) -> dict:
     #         )
     #         return _json.loads(resp.choices[0].message.content)
     #     except Exception as e:
-    #         print(f"  ⚠️  Google metadata failed: {e}")
+    #         print(f"  ⚠️  OpenAI metadata failed: {e}")
     #
     if not text or not text.strip():
         return {"topic": "general", "entities": [], "category": "policy", "language": "vi"}
-    if GOOGLE_API_KEY:
+    if OPENAI_API_KEY:
         try:
-            response = _google_text(
+            response = _openai_text(
                 'Trích xuất metadata từ đoạn văn. Trả về JSON hợp lệ với các trường: '
                 '{"topic": "...", "entities": ["..."], '
                 '"category": "policy|hr|it|finance", "language": "vi|en"}',
@@ -202,7 +202,7 @@ def extract_metadata(text: str) -> dict:
             if isinstance(metadata, dict):
                 return _normalise_metadata(metadata)
         except Exception as e:
-            print(f"  ⚠️  Google metadata failed: {e}")
+            print(f"  ⚠️  OpenAI metadata failed: {e}")
 
     lowered = text.casefold()
     category = "policy"
@@ -227,7 +227,7 @@ def _enrich_single_call(text: str, source: str) -> dict:
     ⚠️ Cost optimization: 1 API call thay vì 4 calls riêng lẻ.
     """
     # Implementation outline retained for lab review:
-    # if GOOGLE_API_KEY:
+    # if OPENAI_API_KEY:
     #     try:
     #         import json as _json
     #         response = generate_text(
@@ -246,9 +246,9 @@ def _enrich_single_call(text: str, source: str) -> dict:
     #         return _json.loads(resp.choices[0].message.content)
     #     except Exception as e:
     #         print(f"  ⚠️  Enrichment API failed: {e}")
-    if GOOGLE_API_KEY:
+    if OPENAI_API_KEY:
         try:
-            response = _google_text(
+            response = _openai_text(
                 """Phân tích đoạn văn và trả về JSON hợp lệ, không markdown:
 {
   "summary": "tóm tắt 2-3 câu",
@@ -279,10 +279,10 @@ def _enrich_single_call(text: str, source: str) -> dict:
     }
 
 
-def _google_text(system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+def _openai_text(system_prompt: str, user_prompt: str, max_tokens: int) -> str:
     from openai import OpenAI
 
-    client = OpenAI(api_key=GOOGLE_API_KEY, base_url=LLM_BASE_URL)
+    client = OpenAI(api_key=OPENAI_API_KEY)
     response = client.chat.completions.create(
         model=LLM_MODEL,
         messages=[{"role": "system", "content": system_prompt},

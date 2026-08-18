@@ -6,7 +6,7 @@ import os, sys, json, math
 from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import LLM_BASE_URL, LLM_EMBEDDING_MODEL, LLM_MODEL, OPENAI_API_KEY, TEST_SET_PATH
+from config import LLM_EMBEDDING_MODEL, LLM_MODEL, OPENAI_API_KEY, TEST_SET_PATH
 
 
 @dataclass
@@ -60,7 +60,7 @@ def evaluate_ragas(questions: list[str], answers: list[str],
     # RAGAS' default metrics use an LLM.  Avoid entering its retry loop when
     # the pipeline is intentionally being run without an API key (as in CI).
     if not OPENAI_API_KEY:
-        return empty
+        return {**empty, "evaluation_error": "OPENAI_API_KEY is missing; RAGAS metrics require an LLM."}
 
     try:
         from ragas import evaluate
@@ -74,17 +74,17 @@ def evaluate_ragas(questions: list[str], answers: list[str],
             "question": list(questions), "answer": list(answers),
             "contexts": list(contexts), "ground_truth": list(ground_truths),
         })
-        llm = ChatOpenAI(
-            model=LLM_MODEL,
-            api_key=OPENAI_API_KEY,
-            base_url=LLM_BASE_URL,
-            temperature=0,
-        )
-        embeddings = OpenAIEmbeddings(
-            model=LLM_EMBEDDING_MODEL,
-            api_key=OPENAI_API_KEY,
-            base_url=LLM_BASE_URL,
-        )
+        llm_kwargs = {
+            "model": LLM_MODEL,
+            "api_key": OPENAI_API_KEY,
+            "temperature": 0,
+        }
+        embedding_kwargs = {
+            "model": LLM_EMBEDDING_MODEL,
+            "api_key": OPENAI_API_KEY,
+        }
+        llm = ChatOpenAI(**llm_kwargs)
+        embeddings = OpenAIEmbeddings(**embedding_kwargs)
         result = evaluate(
             dataset,
             metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
@@ -103,7 +103,7 @@ def evaluate_ragas(questions: list[str], answers: list[str],
             per_question.append(EvalResult(
                 question=str(row.get("question", questions[source_index])),
                 answer=str(row.get("answer", answers[source_index])),
-                contexts=list(row.get("contexts", contexts[source_index]) or []),
+                contexts=_safe_contexts(row.get("contexts", contexts[source_index])),
                 ground_truth=str(row.get("ground_truth", ground_truths[source_index])),
                 **{name: _safe_score(row.get(name, 0.0)) for name in metric_names},
             ))
@@ -115,10 +115,17 @@ def evaluate_ragas(questions: list[str], answers: list[str],
             name: _mean(getattr(item, name) for item in per_question)
             for name in metric_names
         }
-        return {**aggregate, "per_question": per_question}
+        result_data = {**aggregate, "per_question": per_question}
+        if per_question and all(aggregate[name] == 0.0 for name in metric_names):
+            result_data["evaluation_warning"] = (
+                "All RAGAS metrics are 0.0. Check the RAGAS log above for OpenAI "
+                "APIConnectionError/rate-limit/quota errors before treating this as model quality."
+            )
+        return result_data
     except Exception as exc:
-        print(f"  ⚠️  RAGAS evaluation failed: {exc}")
-        return empty
+        error = f"{type(exc).__name__}: {exc}"
+        print(f"  [warn] RAGAS evaluation failed: {error}", flush=True)
+        return {**empty, "evaluation_error": error}
 
 
 def failure_analysis(eval_results: list[EvalResult], bottom_n: int = 10) -> list[dict]:
@@ -174,6 +181,19 @@ def _safe_score(value) -> float:
         return 0.0
 
 
+def _safe_contexts(value) -> list[str]:
+    if value is None:
+        return []
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, str):
+        return [value]
+    try:
+        return [str(item) for item in value]
+    except TypeError:
+        return [str(value)]
+
+
 def _mean(values) -> float:
     values = list(values)
     return sum(values) / len(values) if values else 0.0
@@ -193,10 +213,15 @@ def _zero_per_question(questions, answers, contexts, ground_truths) -> list[Eval
 def save_report(results: dict, failures: list[dict], path: str = "ragas_report.json"):
     """Save evaluation report to JSON. (Đã implement sẵn)"""
     report = {
-        "aggregate": {k: v for k, v in results.items() if k != "per_question"},
+        "aggregate": {k: v for k, v in results.items()
+                      if k not in ("per_question", "evaluation_error", "evaluation_warning")},
         "num_questions": len(results.get("per_question", [])),
         "failures": failures,
     }
+    if "evaluation_error" in results:
+        report["evaluation_error"] = results["evaluation_error"]
+    if "evaluation_warning" in results:
+        report["evaluation_warning"] = results["evaluation_warning"]
     with open(path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
     print(f"Report saved to {path}")

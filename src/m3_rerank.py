@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os, re, sys, time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import RERANK_TOP_K
+from config import HF_CACHE_DIR, RERANK_TOP_K, USE_CROSS_ENCODER
 
 
 @dataclass
@@ -29,18 +30,21 @@ class CrossEncoderReranker:
         if self._model is None:
             if self._load_error is not None:
                 return None
+            if not USE_CROSS_ENCODER:
+                return None
             try:
                 # CrossEncoder is deliberately imported lazily: importing this
                 # module must remain possible in lightweight/offline setups.
                 from sentence_transformers import CrossEncoder
+                model_source = _cached_transformer_path(self.model_name) or self.model_name
                 try:
                     # Avoid an unbounded Hugging Face network retry in CI or
                     # an offline workstation when weights are not cached.
-                    self._model = CrossEncoder(self.model_name, local_files_only=True)
+                    self._model = CrossEncoder(model_source, local_files_only=True)
                 except TypeError:
                     # Compatibility with older sentence-transformers and small
                     # test doubles that only accept the model name.
-                    self._model = CrossEncoder(self.model_name)
+                    self._model = CrossEncoder(model_source)
             except (ImportError, OSError, RuntimeError, ValueError) as exc:
                 # Retrieval should still be usable if the optional model or its
                 # weights are unavailable.  The lexical fallback below keeps
@@ -125,6 +129,21 @@ def _normalise_scores(scores: Any, expected: int) -> list[float]:
     if len(scores) != expected:
         raise ValueError("CrossEncoder returned a score for the wrong number of documents")
     return [float(score) for score in scores]
+
+
+def _cached_transformer_path(model_name: str) -> str | None:
+    model_dir = "models--" + model_name.replace("/", "--")
+    snapshots = Path(HF_CACHE_DIR, "hub", model_dir, "snapshots")
+    if not snapshots.exists():
+        return None
+    for snapshot in sorted(snapshots.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True):
+        if (
+            snapshot.is_dir()
+            and (snapshot / "config.json").exists()
+            and ((snapshot / "model.safetensors").exists() or (snapshot / "pytorch_model.bin").exists())
+        ):
+            return str(snapshot)
+    return None
 
 
 def _lexical_scores(query: str, documents: list[dict]) -> list[float]:
